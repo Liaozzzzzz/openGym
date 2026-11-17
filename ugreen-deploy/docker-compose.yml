@@ -1,0 +1,63 @@
+# 绿联 UGOS Docker「项目」用。整份文件自包含：所有配置都写在这里，
+# 不依赖旁边的 .env。IP 和端口已按仓库根目录 .env 填好（192.168.31.65:36789）。
+#
+# 数据用相对路径 ./data：位于 UGOS 创建项目时选择的那个目录下（记得建好并给足读写权限）。
+
+name: opengym
+
+services:
+  # 后端：账号、数据存储（纯 Node，无框架）。数据都在 ./data（项目目录下的
+  # data 文件夹）—— 备份这一个文件夹就够了。
+  api:
+    image: opengym-api:1.4.5-amd64
+    restart: unless-stopped
+    environment:
+      - PORT=3000
+      - DATA_DIR=/data
+      # web 容器做反向代理时带上真实客户端 IP，登录限流才不会把所有人算成一个人
+      - TRUST_PROXY=1
+      # 子路径部署：应用挂在 /opengym 下（api 用它拼 .well-known 发现文档的地址）
+      - BASE_PATH=/opengym
+      # ↓↓ 双地址方案：ORIGIN 填 http 的 IP 地址（不是域名），域名和 IP 都能登录存写。
+      # 原理：存写门槛优先认浏览器自带的 Sec-Fetch-Site: same-origin（页面请求自己的
+      # 地址时必然带上、网页无法伪造），ORIGIN 只是老浏览器/代理剥头后的后备比对；
+      # 而 ORIGIN 若是 https，会话 cookie 会带 Secure 标志，http 的 IP 地址就保持不了
+      # 登录。填 http://IP 后两个地址各自独立登录一次，功能完全一致。
+      # 局限：iOS 16.4 以前的旧 Safari 走域名存写会被拒；passkey 只能绑一个主机，
+      # 以后启用 passkey 时再把这两行换成域名（届时 IP 地址只能看），并删掉
+      # PASSWORD_LOGIN。改这两行后要重新部署项目（重建容器）才生效。
+      - ORIGIN=http://192.168.31.65:36789
+      # 只填 IP 或域名本身，不带 http:// 和端口（现在用密码登录，此行暂不起作用）
+      - RP_ID=192.168.31.65
+      # 纯 HTTP 局域网访问时 passkey 不可用（浏览器限制），先开启账号密码登录。
+      # 以后配置了 HTTPS 反向代理（需要域名）可删掉这行，改用 passkey。
+      - PASSWORD_LOGIN=1
+      # 禁止游客：移除登录页的「继续，不创建账号」按钮，账号成为唯一入口。
+      # 已在游客模式里的浏览器下次访问时会被登出（数据留在那个浏览器里）。
+      - ALLOW_GUEST=0
+      # 第一个注册的档案自动成为管理员。没有内置默认管理员账号：
+      # 你部署后自己注册的档案（自己起的名字 + 自己设的密码）就是管理员。
+      - FIRST_USER_ADMIN=1
+      # 注册需邀请码（管理员在应用内 /admin 面板的 Invite codes 里生成），
+      # 封死「创建新档案」入口（按钮还在，但没有码就是摆设）。
+      # ⚠ 顺序：先部署 → 注册你自己的档案 → 再取消下面这行注释并重新部署项目。
+      # 提前打开会导致谁都注册不了（还没有管理员能发邀请码）。
+      - INVITE_ONLY=1
+    volumes:
+      - ./data:/data
+
+  # 前端：构建好的 React 应用 + nginx，把 /api 转发给 api 容器。
+  # 单一来源，这是 passkey 和手机配对的要求。
+  web:
+    image: opengym-web:1.4.5-amd64
+    restart: unless-stopped
+    depends_on: [api]
+    ports:
+      - "36789:80"
+    environment:
+      - BACKEND=api
+      - PORT=3000
+      # 子路径部署：nginx 在 /opengym/ 下提供应用，并把前缀剥掉后转发给 api。
+      # 不带前缀的访问一律 308 跳到 /opengym/ 下（修正版模板已烧进本镜像，
+      # 无需在 NAS 上挂载或读取任何文件）。
+      - BASE_PATH=/opengym
